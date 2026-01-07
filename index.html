@@ -3,132 +3,197 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Jarvis Stable Interface</title>
+    <title>Jarvis Hologram - Hand Tracking</title>
     <style>
-        body { margin: 0; overflow: hidden; background-color: #000; cursor: none; }
-        #input_video { display: none; }
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; }
+        #video-container { position: absolute; width: 240px; height: 180px; bottom: 20px; right: 20px; border: 2px solid #00d4ff; border-radius: 10px; overflow: hidden; transform: scaleX(-1); }
+        video { width: 100%; height: 100%; object-fit: cover; opacity: 0.5; }
+        #ui-overlay { position: absolute; top: 20px; left: 20px; color: #00d4ff; text-transform: uppercase; letter-spacing: 2px; pointer-events: none; }
+        .status { font-size: 12px; margin-bottom: 5px; text-shadow: 0 0 10px #00d4ff; }
+        canvas { display: block; }
     </style>
 </head>
 <body>
-    <video id="input_video"></video>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <div id="ui-overlay">
+        <div class="status">System: <span id="sys-status">Initializing...</span></div>
+        <div class="status">Target: <span id="tgt-status">Searching...</span></div>
+        <div class="status">Gesture: <span id="gst-status">Idle</span></div>
+    </div>
+
+    <div id="video-container">
+        <video id="input_video"></video>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
 
-    <script>
-        // --- CONFIG ---
-        const P_COUNT = 15000;
-        const SMOOTHING = 0.08; // Lower = smoother/slower, Higher = snappier/jittery
+    <script type="module">
+        import * as THREE from 'three';
 
-        // --- THREE.JS ---
+        const videoElement = document.getElementById('input_video');
+        const sysStatus = document.getElementById('sys-status');
+        const tgtStatus = document.getElementById('tgt-status');
+        const gstStatus = document.getElementById('gst-status');
+
+        // --- THREE.JS SETUP ---
         const scene = new THREE.Scene();
         const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-        const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+        camera.position.z = 5;
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
         document.body.appendChild(renderer.domElement);
 
-        camera.position.z = 12;
+        // --- PARTICLE SYSTEM ---
+        const particleCount = 4200; // 200 particles per joint (21 joints)
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(particleCount * 3);
+        const colors = new Float32Array(particleCount * 3);
 
-        // Particle Geometry
-        const geo = new THREE.BufferGeometry();
-        const pos = new Float32Array(P_COUNT * 3);
-        for(let i=0; i<P_COUNT*3; i++) pos[i] = (Math.random()-0.5)*20;
-        geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        // Create a glow texture programmatically
+        const createGlowTexture = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64; canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+            gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');
+            gradient.addColorStop(0.2, 'rgba(0, 212, 255, 0.8)');
+            gradient.addColorStop(0.5, 'rgba(0, 60, 100, 0.3)');
+            gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, 64, 64);
+            const texture = new THREE.CanvasTexture(canvas);
+            return texture;
+        };
 
-        const mat = new THREE.PointsMaterial({
-            size: 0.04,
-            color: 0x00ffff,
+        const material = new THREE.PointsMaterial({
+            size: 0.06,
+            map: createGlowTexture(),
             transparent: true,
-            opacity: 0.6,
             blending: THREE.AdditiveBlending,
-            depthWrite: false
+            depthWrite: false,
+            vertexColors: true
         });
 
-        const points = new THREE.Points(geo, mat);
-        scene.add(points);
+        // Initialize particles in a random cloud
+        for(let i=0; i<particleCount; i++) {
+            positions[i*3] = (Math.random() - 0.5) * 10;
+            positions[i*3+1] = (Math.random() - 0.5) * 10;
+            positions[i*3+2] = (Math.random() - 0.5) * 10;
+            colors[i*3] = 0; colors[i*3+1] = 0.8; colors[i*3+2] = 1.0;
+        }
 
-        // --- TRACKING STATE ---
-        let rawHand = { x: 0, y: 0, z: 0 };
-        let smoothHand = { x: 0, y: 0, z: 0 };
-        let currentExpansion = 1.0;
-        let targetExpansion = 1.0;
-        let isActive = false;
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        const particleSystem = new THREE.Points(geometry, material);
+        scene.add(particleSystem);
 
-        // --- MEDIAPIPE ---
+        // --- MATH UTILS ---
+        const lerp = (a, b, t) => a + (b - a) * t;
+        const landmarkPoints = Array.from({length: 21}, () => new THREE.Vector3());
+        let isPinching = false;
+
+        // --- MEDIAPIPE LOGIC ---
+        function onResults(results) {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                tgtStatus.innerText = "Tracking Locked";
+                const landmarks = results.multiHandLandmarks[0];
+
+                // Check for pinch (Index tip to Thumb tip distance)
+                const dx = landmarks[4].x - landmarks[8].x;
+                const dy = landmarks[4].y - landmarks[8].y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                isPinching = dist < 0.05;
+                gstStatus.innerText = isPinching ? "Morphing: Apple" : "Gesture: Tracking";
+
+                // Map 21 landmarks to 3D space
+                landmarks.forEach((lm, i) => {
+                    // Convert normalized [0,1] to Three.js coordinates
+                    const x = (lm.x - 0.5) * 10 * (window.innerWidth / window.innerHeight);
+                    const y = (0.5 - lm.y) * 10;
+                    const z = -lm.z * 10;
+                    landmarkPoints[i].set(x, y, z);
+                });
+            } else {
+                tgtStatus.innerText = "Searching...";
+                gstStatus.innerText = "Idle";
+            }
+        }
+
         const hands = new Hands({
             locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
         });
 
         hands.setOptions({
-            maxNumHands: 2,
-            modelComplexity: 1, // Use "Full" model for better stability
-            minDetectionConfidence: 0.8,
-            minTrackingConfidence: 0.8
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
         });
+        hands.onResults(onResults);
 
-        hands.onResults((results) => {
-            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-                isActive = true;
-                const h1 = results.multiHandLandmarks[0][9]; // Middle finger base (stable point)
-                
-                // Convert to 3D Space
-                rawHand.x = (h1.x - 0.5) * -25;
-                rawHand.y = (h1.y - 0.5) * -18;
-                
-                if (results.multiHandLandmarks.length === 2) {
-                    const h2 = results.multiHandLandmarks[1][9];
-                    const d = Math.sqrt(Math.pow(h1.x-h2.x, 2) + Math.pow(h1.y-h2.y, 2));
-                    targetExpansion = d * 10;
-                } else {
-                    targetExpansion = 1.2;
-                }
-            } else {
-                isActive = false;
-                targetExpansion = 1.0;
-            }
+        const cameraFeed = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({image: videoElement}); },
+            width: 640, height: 480
         });
+        cameraFeed.start();
+        sysStatus.innerText = "Online";
 
-        const video = document.getElementById('input_video');
-        const cam = new Camera(video, {
-            onFrame: async () => { await hands.send({image: video}); },
-            width: 1280, height: 720
-        });
-        cam.start();
-
-        // --- ANIMATION ---
+        // --- ANIMATION LOOP ---
         function animate() {
             requestAnimationFrame(animate);
+            const posAttr = geometry.attributes.position;
+            const time = Date.now() * 0.002;
 
-            // 1. Smooth the hand movement (The "Jarvis" Flow)
-            smoothHand.x += (rawHand.x - smoothHand.x) * SMOOTHING;
-            smoothHand.y += (rawHand.y - smoothHand.y) * SMOOTHING;
-            currentExpansion += (targetExpansion - currentExpansion) * 0.1;
-
-            const positions = geo.attributes.position.array;
-
-            for (let i = 0; i < P_COUNT; i++) {
+            for (let i = 0; i < particleCount; i++) {
                 const i3 = i * 3;
+                const jointIdx = i % 21;
+                const target = new THREE.Vector3();
 
-                // Each particle drifts toward the smooth hand position
-                // We add a tiny bit of "random" noise to keep it looking like energy
-                const noise = (Math.random() - 0.5) * 0.1;
-
-                positions[i3] += (smoothHand.x - positions[i3]) * 0.03 * currentExpansion + noise;
-                positions[i3+1] += (smoothHand.y - positions[i3+1]) * 0.03 * currentExpansion + noise;
-                
-                // Subtle spiral effect
-                if(!isActive) {
-                    positions[i3] += Math.cos(Date.now() * 0.001 + i) * 0.01;
-                    positions[i3+1] += Math.sin(Date.now() * 0.001 + i) * 0.01;
+                if (isPinching) {
+                    // MAPPING TO APPLE (Sphere with indentation)
+                    const phi = Math.acos(-1 + (2 * i) / particleCount);
+                    const theta = Math.sqrt(particleCount * Math.PI) * phi;
+                    target.set(
+                        Math.cos(theta) * Math.sin(phi) * 1.5,
+                        Math.sin(theta) * Math.sin(phi) * 1.5 + Math.cos(phi) * 0.2, // slight indent
+                        Math.cos(phi) * 1.5
+                    );
+                    // Add slight stem for apple look
+                    if(i > particleCount * 0.95) target.set(0, 1.8 + Math.random()*0.4, 0);
+                    
+                    // Move the whole apple to follow the hand center (Wrist)
+                    target.add(landmarkPoints[0]);
+                } else {
+                    // MAPPING TO SKELETON
+                    const anchor = landmarkPoints[jointIdx];
+                    // Add some jitter/noise around the joint so it's not a single point
+                    const noiseX = Math.sin(time + i) * 0.15;
+                    const noiseY = Math.cos(time + i * 1.1) * 0.15;
+                    const noiseZ = Math.sin(time * 0.5 + i) * 0.15;
+                    
+                    target.set(anchor.x + noiseX, anchor.y + noiseY, anchor.z + noiseZ);
                 }
+
+                // Smoothly pull particles to target
+                posAttr.array[i3] = lerp(posAttr.array[i3], target.x, 0.1);
+                posAttr.array[i3+1] = lerp(posAttr.array[i3+1], target.y, 0.1);
+                posAttr.array[i3+2] = lerp(posAttr.array[i3+2], target.z, 0.1);
             }
 
-            points.rotation.y += 0.002;
-            geo.attributes.position.needsUpdate = true;
-            
-            // Pulsing color based on expansion
-            mat.color.setHSL(0.5, 1.0, 0.3 + (currentExpansion * 0.1));
-
+            posAttr.needsUpdate = true;
+            particleSystem.rotation.y += 0.002; // Slow background spin
             renderer.render(scene, camera);
         }
 

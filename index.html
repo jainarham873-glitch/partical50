@@ -3,26 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Hand Particle System</title>
+    <title>Particle 50</title>
     <style>
-        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+        body { margin: 0; overflow: hidden; background-color: #000; }
         canvas { display: block; }
-        #info {
-            position: absolute; top: 10px; left: 10px; color: white;
-            background: rgba(0,0,0,0.5); padding: 10px; pointer-events: none;
-        }
-        /* Hidden video element for MediaPipe processing */
         #input_video { display: none; }
     </style>
 </head>
 <body>
-
-    <div id="info">
-        <b>Interactive 3D Particles</b><br>
-        1. Show your hand to the camera.<br>
-        2. Move your hand to move the particle cloud.<br>
-        3. Pinch thumb & index to change color/expand.
-    </div>
 
     <video id="input_video"></video>
 
@@ -31,121 +19,122 @@
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
 
     <script>
-        // --- 1. THREE.JS SCENE SETUP ---
+        // --- SCENE SETUP ---
         const scene = new THREE.Scene();
         const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
         document.body.appendChild(renderer.domElement);
 
-        camera.position.z = 5;
+        camera.position.z = 10;
 
-        // Create Particles
-        const particleCount = 5000;
+        // --- PARTICLE ENGINE ---
+        const count = 12000;
         const geometry = new THREE.BufferGeometry();
-        const positions = new Float32Array(particleCount * 3);
-        const colors = new Float32Array(particleCount * 3);
+        const positions = new Float32Array(count * 3);
+        const velocities = new Float32Array(count * 3);
 
-        for (let i = 0; i < particleCount; i++) {
+        for (let i = 0; i < count; i++) {
             positions[i * 3] = (Math.random() - 0.5) * 10;
             positions[i * 3 + 1] = (Math.random() - 0.5) * 10;
-            positions[i * 3 + 2] = (Math.random() - 0.5) * 5;
+            positions[i * 3 + 2] = (Math.random() - 0.5) * 10;
         }
 
         geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
         const material = new THREE.PointsMaterial({
-            size: 0.05,
-            vertexColors: true,
+            size: 0.035,
+            color: 0x00ffff,
             transparent: true,
-            opacity: 0.8
+            opacity: 0.8,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
         });
 
-        const particleSystem = new THREE.Points(geometry, material);
-        scene.add(particleSystem);
+        const points = new THREE.Points(geometry, material);
+        scene.add(points);
 
-        // --- 2. MEDIAPIPE HANDS SETUP ---
+        // --- GESTURE STATE ---
+        let targetPos = new THREE.Vector3(0, 0, 0);
+        let expansionFactor = 1.0;
+        let rotationSpeed = 0.005;
+
+        // --- MEDIAPIPE ---
         const videoElement = document.getElementById('input_video');
-        let handX = 0, handY = 0, handZ = 0, isPinching = false;
-
         const hands = new Hands({
             locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
         });
 
         hands.setOptions({
-            maxNumHands: 1,
+            maxNumHands: 2,
             modelComplexity: 1,
-            minDetectionConfidence: 0.5,
-            minTrackingConfidence: 0.5
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.6
         });
 
         hands.onResults((results) => {
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-                const landmarks = results.multiHandLandmarks[0];
-                
-                // Track Index Finger Tip (Landmark 8)
-                // Normalize coordinates to Three.js space (-5 to 5)
-                handX = (landmarks[8].x - 0.5) * -10; 
-                handY = (landmarks[8].y - 0.5) * -10;
-                handZ = landmarks[8].z * -10;
+                // Handle 1 or 2 hands
+                const landmarks1 = results.multiHandLandmarks[0];
+                const palm1 = landmarks1[9];
 
-                // Detect Pinch (Thumb tip 4 and Index tip 8)
-                const dx = landmarks[4].x - landmarks[8].x;
-                const dy = landmarks[4].y - landmarks[8].y;
-                const distance = Math.sqrt(dx*dx + dy*dy);
-                isPinching = distance < 0.05;
+                // Map hand 1 to screen coordinates
+                targetPos.x = (palm1.x - 0.5) * -20;
+                targetPos.y = (palm1.y - 0.5) * -15;
+
+                if (results.multiHandLandmarks.length === 2) {
+                    // Two-hand zoom logic
+                    const landmarks2 = results.multiHandLandmarks[1];
+                    const palm2 = landmarks2[9];
+                    const dist = Math.sqrt(
+                        Math.pow(palm1.x - palm2.x, 2) + 
+                        Math.pow(palm1.y - palm2.y, 2)
+                    );
+                    expansionFactor = dist * 8; // Zoom level
+                    rotationSpeed = (palm1.x - palm2.x) * 0.1; // Rotate based on hand tilt
+                } else {
+                    expansionFactor = 1.0;
+                    rotationSpeed = 0.005;
+                }
             }
         });
 
         const cameraFeed = new Camera(videoElement, {
             onFrame: async () => { await hands.send({image: videoElement}); },
-            width: 640, height: 480
+            width: 1280, height: 720
         });
         cameraFeed.start();
 
-        // --- 3. ANIMATION LOOP ---
+        // --- ANIMATION LOOP ---
         function animate() {
             requestAnimationFrame(animate);
 
-            const posArray = geometry.attributes.position.array;
-            const colorArray = geometry.attributes.color.array;
-
-            for (let i = 0; i < particleCount; i++) {
+            const pos = geometry.attributes.position.array;
+            
+            // Apply movement to every particle
+            for (let i = 0; i < count; i++) {
                 const i3 = i * 3;
-
-                // Particles move toward hand position
-                const targetX = handX + (Math.random() - 0.5) * (isPinching ? 5 : 2);
-                const targetY = handY + (Math.random() - 0.5) * (isPinching ? 5 : 2);
-                const targetZ = handZ;
-
-                // Linear Interpolation (Lerp) for smooth movement
-                posArray[i3] += (targetX - posArray[i3]) * 0.02;
-                posArray[i3 + 1] += (targetY - posArray[i3 + 1]) * 0.02;
-                posArray[i3 + 2] += (targetZ - posArray[i3 + 2]) * 0.02;
-
-                // Color change logic
-                if (isPinching) {
-                    colorArray[i3] = 1.0;     // Red
-                    colorArray[i3 + 1] = 0.2; // Green
-                    colorArray[i3 + 2] = 0.2; // Blue
-                } else {
-                    colorArray[i3] = 0.2;     // Cyan-ish
-                    colorArray[i3 + 1] = 0.8;
-                    colorArray[i3 + 2] = 1.0;
-                }
+                
+                // Drift toward the hand
+                pos[i3] += (targetPos.x - pos[i3]) * 0.02 * expansionFactor;
+                pos[i3 + 1] += (targetPos.y - pos[i3 + 1]) * 0.02 * expansionFactor;
+                
+                // Add some chaotic "hologram" jitter
+                pos[i3] += (Math.random() - 0.5) * 0.05;
+                pos[i3+1] += (Math.random() - 0.5) * 0.05;
             }
 
-            geometry.attributes.position.needsUpdate = true;
-            geometry.attributes.color.needsUpdate = true;
+            points.rotation.y += rotationSpeed;
+            points.rotation.z += 0.001;
 
-            particleSystem.rotation.y += 0.001;
+            geometry.attributes.position.needsUpdate = true;
             renderer.render(scene, camera);
         }
 
         animate();
 
-        // Handle Resize
+        // Responsive Resize
         window.addEventListener('resize', () => {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();

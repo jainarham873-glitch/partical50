@@ -3,138 +3,137 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Particle 50</title>
+    <title>Jarvis Stable Interface</title>
     <style>
-        body { margin: 0; overflow: hidden; background-color: #000; }
-        canvas { display: block; }
+        body { margin: 0; overflow: hidden; background-color: #000; cursor: none; }
         #input_video { display: none; }
     </style>
 </head>
 <body>
-
     <video id="input_video"></video>
-
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
 
     <script>
-        // --- SCENE SETUP ---
+        // --- CONFIG ---
+        const P_COUNT = 15000;
+        const SMOOTHING = 0.08; // Lower = smoother/slower, Higher = snappier/jittery
+
+        // --- THREE.JS ---
         const scene = new THREE.Scene();
         const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
         renderer.setSize(window.innerWidth, window.innerHeight);
-        renderer.setPixelRatio(window.devicePixelRatio);
         document.body.appendChild(renderer.domElement);
 
-        camera.position.z = 10;
+        camera.position.z = 12;
 
-        // --- PARTICLE ENGINE ---
-        const count = 12000;
-        const geometry = new THREE.BufferGeometry();
-        const positions = new Float32Array(count * 3);
-        const velocities = new Float32Array(count * 3);
+        // Particle Geometry
+        const geo = new THREE.BufferGeometry();
+        const pos = new Float32Array(P_COUNT * 3);
+        for(let i=0; i<P_COUNT*3; i++) pos[i] = (Math.random()-0.5)*20;
+        geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
 
-        for (let i = 0; i < count; i++) {
-            positions[i * 3] = (Math.random() - 0.5) * 10;
-            positions[i * 3 + 1] = (Math.random() - 0.5) * 10;
-            positions[i * 3 + 2] = (Math.random() - 0.5) * 10;
-        }
-
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-
-        const material = new THREE.PointsMaterial({
-            size: 0.035,
+        const mat = new THREE.PointsMaterial({
+            size: 0.04,
             color: 0x00ffff,
             transparent: true,
-            opacity: 0.8,
+            opacity: 0.6,
             blending: THREE.AdditiveBlending,
             depthWrite: false
         });
 
-        const points = new THREE.Points(geometry, material);
+        const points = new THREE.Points(geo, mat);
         scene.add(points);
 
-        // --- GESTURE STATE ---
-        let targetPos = new THREE.Vector3(0, 0, 0);
-        let expansionFactor = 1.0;
-        let rotationSpeed = 0.005;
+        // --- TRACKING STATE ---
+        let rawHand = { x: 0, y: 0, z: 0 };
+        let smoothHand = { x: 0, y: 0, z: 0 };
+        let currentExpansion = 1.0;
+        let targetExpansion = 1.0;
+        let isActive = false;
 
         // --- MEDIAPIPE ---
-        const videoElement = document.getElementById('input_video');
         const hands = new Hands({
             locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
         });
 
         hands.setOptions({
             maxNumHands: 2,
-            modelComplexity: 1,
-            minDetectionConfidence: 0.6,
-            minTrackingConfidence: 0.6
+            modelComplexity: 1, // Use "Full" model for better stability
+            minDetectionConfidence: 0.8,
+            minTrackingConfidence: 0.8
         });
 
         hands.onResults((results) => {
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-                // Handle 1 or 2 hands
-                const landmarks1 = results.multiHandLandmarks[0];
-                const palm1 = landmarks1[9];
-
-                // Map hand 1 to screen coordinates
-                targetPos.x = (palm1.x - 0.5) * -20;
-                targetPos.y = (palm1.y - 0.5) * -15;
-
+                isActive = true;
+                const h1 = results.multiHandLandmarks[0][9]; // Middle finger base (stable point)
+                
+                // Convert to 3D Space
+                rawHand.x = (h1.x - 0.5) * -25;
+                rawHand.y = (h1.y - 0.5) * -18;
+                
                 if (results.multiHandLandmarks.length === 2) {
-                    // Two-hand zoom logic
-                    const landmarks2 = results.multiHandLandmarks[1];
-                    const palm2 = landmarks2[9];
-                    const dist = Math.sqrt(
-                        Math.pow(palm1.x - palm2.x, 2) + 
-                        Math.pow(palm1.y - palm2.y, 2)
-                    );
-                    expansionFactor = dist * 8; // Zoom level
-                    rotationSpeed = (palm1.x - palm2.x) * 0.1; // Rotate based on hand tilt
+                    const h2 = results.multiHandLandmarks[1][9];
+                    const d = Math.sqrt(Math.pow(h1.x-h2.x, 2) + Math.pow(h1.y-h2.y, 2));
+                    targetExpansion = d * 10;
                 } else {
-                    expansionFactor = 1.0;
-                    rotationSpeed = 0.005;
+                    targetExpansion = 1.2;
                 }
+            } else {
+                isActive = false;
+                targetExpansion = 1.0;
             }
         });
 
-        const cameraFeed = new Camera(videoElement, {
-            onFrame: async () => { await hands.send({image: videoElement}); },
+        const video = document.getElementById('input_video');
+        const cam = new Camera(video, {
+            onFrame: async () => { await hands.send({image: video}); },
             width: 1280, height: 720
         });
-        cameraFeed.start();
+        cam.start();
 
-        // --- ANIMATION LOOP ---
+        // --- ANIMATION ---
         function animate() {
             requestAnimationFrame(animate);
 
-            const pos = geometry.attributes.position.array;
-            
-            // Apply movement to every particle
-            for (let i = 0; i < count; i++) {
+            // 1. Smooth the hand movement (The "Jarvis" Flow)
+            smoothHand.x += (rawHand.x - smoothHand.x) * SMOOTHING;
+            smoothHand.y += (rawHand.y - smoothHand.y) * SMOOTHING;
+            currentExpansion += (targetExpansion - currentExpansion) * 0.1;
+
+            const positions = geo.attributes.position.array;
+
+            for (let i = 0; i < P_COUNT; i++) {
                 const i3 = i * 3;
+
+                // Each particle drifts toward the smooth hand position
+                // We add a tiny bit of "random" noise to keep it looking like energy
+                const noise = (Math.random() - 0.5) * 0.1;
+
+                positions[i3] += (smoothHand.x - positions[i3]) * 0.03 * currentExpansion + noise;
+                positions[i3+1] += (smoothHand.y - positions[i3+1]) * 0.03 * currentExpansion + noise;
                 
-                // Drift toward the hand
-                pos[i3] += (targetPos.x - pos[i3]) * 0.02 * expansionFactor;
-                pos[i3 + 1] += (targetPos.y - pos[i3 + 1]) * 0.02 * expansionFactor;
-                
-                // Add some chaotic "hologram" jitter
-                pos[i3] += (Math.random() - 0.5) * 0.05;
-                pos[i3+1] += (Math.random() - 0.5) * 0.05;
+                // Subtle spiral effect
+                if(!isActive) {
+                    positions[i3] += Math.cos(Date.now() * 0.001 + i) * 0.01;
+                    positions[i3+1] += Math.sin(Date.now() * 0.001 + i) * 0.01;
+                }
             }
 
-            points.rotation.y += rotationSpeed;
-            points.rotation.z += 0.001;
+            points.rotation.y += 0.002;
+            geo.attributes.position.needsUpdate = true;
+            
+            // Pulsing color based on expansion
+            mat.color.setHSL(0.5, 1.0, 0.3 + (currentExpansion * 0.1));
 
-            geometry.attributes.position.needsUpdate = true;
             renderer.render(scene, camera);
         }
 
         animate();
 
-        // Responsive Resize
         window.addEventListener('resize', () => {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
